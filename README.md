@@ -66,27 +66,41 @@
 
 ## 3. 安装
 
-安装会写入 **desktop profile**：`C:\Users\ming\.dsh\profiles\desktop`（`package.json` / `pnpm-lock.yaml` / `node_modules`）。
+`dsh plugin add` 会做两件事：用 pnpm 把包装进 **desktop profile**（`<DSH_HOME>\profiles\desktop`，本机 `DSH_HOME` = `C:\Users\ming\.dsh`），再把带 `dsh.bundle.patch` 的依赖名追加到 `dsh.profile.bundles`（包里的 `cordis.patch.yml` 已声明自己是 bundle 层）。
 
-> 先备份 `package.json` 与 `pnpm-lock.yaml`，并**退出 DSH 桌面端**再安装（CLI 写 profile 时会阻止 profile 启动）。
+> 安装前**退出 DSH 桌面端**（CLI 写 profile 时会阻止 profile 启动）；想留后路就先备份 profile 里的 `package.json` 与 `pnpm-lock.yaml`。
 
-### 方式 A：CLI（推荐）
+### 方式 A：从 GitHub 安装（普通用户走这条）
+
+```powershell
+dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete           # 跟随 main 最新提交
+dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete#v0.1.2   # 固定到 release tag（推荐）
+```
+
+- 走 GitHub 打好的 tarball（`codeload.github.com`），**用户本机不需要装 git**。本包没有运行期依赖（`package.json` 无 `dependencies`），装的就是这一个 tarball。已实测：`github:Baboo-ming/dsh-session-delete` 12 s 装完 `0.1.2`，`pnpm-lock.yaml` 把来源锁成提交 `defac52`。
+- 不想开终端也可以：**设置 → 插件 → 安装**，粘贴 `github:Baboo-ming/dsh-session-delete`（同一套 spec 解析器）。
+- **升级**：换成新 tag 重跑一次（`…#v0.1.3`）。`github:` 依赖在 lockfile 里按**提交**锁定，不重跑、不换 tag 就一直是旧版本。
+- 同一套 spec 还接受 `git+https://github.com/…`、完整仓库 URL、`.tgz` 地址、registry 名（`dsh-session-delete@0.1.2`，前提是发过 npm）和本地绝对路径。
+
+### 方式 B：本地目录（只有作者 / 二次开发用）
 
 ```powershell
 dsh plugin --profile desktop add "link:D:\AI_Work\开发\删除会话插件"
 ```
 
-### 方式 B：手动
+`link:` 建的是指向本项目目录的 junction，改代码不必重装，配合本节末尾的 `hmr.root` 即可热更新——**本机（开发机）用的就是这条**。普通用户**不要**走这个：它引用的是作者本机的绝对路径，在别人机器上根本解析不到（`dsh plugin add` 也要求本地路径必须是绝对路径，会直接报 `a local path must be absolute`）。
+
+### 方式 C：手动（CLI 不可用时）
 
 ```powershell
-$NODE = "D:\AI_Programs\Deepseek-harness\resources\runtime\primary-runtime\dependencies\node\bin\node.exe"
-$PNPM = "D:\AI_Programs\Deepseek-harness\resources\runtime\primary-runtime\dependencies\pnpm\bin\pnpm.cjs"
-Set-Location "C:\Users\ming\.dsh\profiles\desktop"
-& $NODE $PNPM add "link:D:/AI_Work/开发/删除会话插件"    # 只建 junction，不下载
-& $NODE $PNPM install                                    # link: 也必须跑一次，写 lockfile importer
+$NODE = "<DSH_HOME>\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
+$PNPM = "<DSH_HOME>\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.cjs"
+Set-Location "<DSH_HOME>\profiles\desktop"
+& $NODE $PNPM add "github:Baboo-ming/dsh-session-delete#v0.1.2"   # 本地开发改成 "link:<本项目绝对路径>"
+& $NODE $PNPM install                                            # 写 lockfile importer
 ```
 
-然后把 `"dsh-session-delete"` **追加到 `dsh.profile.bundles` 数组末尾**（顺序即 bundle 层顺序）。`link:` 指到本目录，所以后续只改本目录的代码即可，不需要重新安装。
+然后把 `"dsh-session-delete"` **追加到 `dsh.profile.bundles` 数组末尾**（顺序即 bundle 层顺序）。
 
 **不要**再往 profile 自己的 `cordis.patch.yml` 里插一行同名插件：`cordis.patch.yml`（bundle patch）已经会插入，重复 id 会让加载器崩。
 
@@ -115,29 +129,25 @@ Set-Location "C:\Users\ming\.dsh\profiles\desktop"
 
 - 然后在侧栏任意会话行点 `…` 找到「删除会话」。
 
-### 发布到 GitHub
+### 作者 / 维护者：发布与发版
 
-可以直接公开：`package.json`、`cordis.patch.yml`、`lib/`、`tools/`、`tests/`、`README.md`、`LICENSE`、`.gitignore`。
+仓库：<https://github.com/Baboo-ming/dsh-session-delete>（MIT）。可公开的只有 `package.json`、`cordis.patch.yml`、`lib/`、`tools/`、`tests/`、`docs/`、`README.md`、`LICENSE`、`.gitignore`（共 24 个文件）。
 
 **不要**提交 `.ref/`——那是从 `resources/app.asar` 解包出来的 DSH 应用源码（本机 11,470 个文件 / 112.5 MB，属第三方代码），`.gitignore` 已排除。`docs/research/r1–r4.md` 是本项目自己写的研究笔记，但内含 DSH 内部源码的 `file:line` 引用与片段，公开前请自行过一遍（不想公开就把它加进 `.gitignore`）。本目录也没有 `node_modules`（依赖是装在 profile 里的 junction）。
 
-首次发布：
+发版流程（每次改完把 `package.json` 与 `lib/index.js` 的 `version` 一起升）：
 
 ```powershell
-git init
 git add -A
-git commit -m "dsh-session-delete 0.1.2"
-git remote add origin https://github.com/<you>/dsh-session-delete.git
-git push -u origin main
+git commit -m "dsh-session-delete 0.1.3"
+git push origin main
+git tag -a v0.1.3 -m "dsh-session-delete 0.1.3"
+git push origin v0.1.3
 ```
 
-别人安装（`dsh plugin add` 会自己把带 `dsh.bundle.patch` 的依赖追加进 `dsh.profile.bundles`）：
+推完 tag，用户就能用 `github:Baboo-ming/dsh-session-delete#v0.1.3` 安装或升级到这一版（不打 tag 也能装，但锁的是某个提交，不好核对版本）。
 
-```powershell
-dsh plugin --profile desktop add github:<you>/dsh-session-delete
-```
-
-> `package.json` 里的 `"private": true` 只挡 `npm publish`，不影响 `github:`/`link:` 安装；打算同时发 npm 就把它改成 `false`。
+> `package.json` 里的 `"private": true` 只挡 `npm publish`，不影响 `github:` / `link:` 安装；哪天想同时发 npm，把它改成 `false`，用户就能 `dsh plugin --profile desktop add dsh-session-delete@0.1.3`。
 
 ---
 
@@ -231,7 +241,9 @@ $NODE = "C:\Users\ming\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\b
 
 ### 真实 DSH 端到端验证（本机 desktop profile，已完成）
 
-安装形态：`C:\Users\ming\.dsh\profiles\desktop\package.json` 里以 `link:D:/AI_Work/开发/删除会话插件` 依赖本目录（`node_modules\dsh-session-delete` 是 junction），`dsh.profile.bundles` 末尾追加 `dsh-session-delete`；回滚备份为同目录下 `package.json.bak-session-delete-20261009104827` 与 `pnpm-lock.yaml.bak-session-delete-20261009104827`。
+安装形态（本机开发机）：`C:\Users\ming\.dsh\profiles\desktop\package.json` 里以 `link:D:/AI_Work/开发/删除会话插件` 依赖本目录（`node_modules\dsh-session-delete` 是 junction），`dsh.profile.bundles` 末尾追加 `dsh-session-delete`；回滚备份为同目录下 `package.json.bak-session-delete-20261009104827` 与 `pnpm-lock.yaml.bak-session-delete-20261009104827`。
+
+发布形态（普通用户）：`github:Baboo-ming/dsh-session-delete`（及 `…#v0.1.2`）已用 profile 同一份 pnpm 在临时目录实测——12 s 装完 `0.1.2`，lockfile 把来源锁成 `https://codeload.github.com/Baboo-ming/dsh-session-delete/tar.gz/defac52…`；**tarball 直取，本机无需 git**。
 
 | 验证项 | 实测结果 |
 |--------|----------|
@@ -277,7 +289,8 @@ $NODE = "C:\Users\ming\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\b
 
 | 现象 | 排查 |
 |------|------|
-| `…` 菜单里没有「删除会话」 | 客户端插件没加载：确认 `bundles` 里有 `dsh-session-delete`、`node_modules` 里有 junction、已重启 + 刷新页面；再确认槽位 `sidebar.workspaces.session.menu.item` 仍是 `kind: "list"`（跑 `tests/client-bundle.test.js` 会交叉核对 `.ref/` 真实契约） |
+| `…` 菜单里没有「删除会话」 | 客户端插件没加载：确认 `dsh.profile.bundles` 里有 `dsh-session-delete`、`node_modules\dsh-session-delete` 存在（GitHub 安装是普通目录，`link:` 安装是 junction）、已重启桌面端并刷新页面；再确认槽位 `sidebar.workspaces.session.menu.item` 仍是 `kind: "list"`（跑 `tests/client-bundle.test.js` 会交叉核对 `.ref/` 真实契约） |
+| `dsh plugin add` 直接报 `a local path must be absolute` | 路径式 spec（`link:` / `file:` / 裸路径）必须是**绝对**路径；从 GitHub 装请写 `github:<owner>/<repo>[#tag]`。安装失败时 `dsh plugin add` 会把 profile 的 `package.json` / `pnpm-lock.yaml` 还原成原样（已下载的文件可能留下） |
 | 确认框一直转圈/报网络错 | 宿主路由没挂上：`/session-delete/health` 是否 200；`webServer` 能力是否可用；客户端 20 s 超时会提示「宿主无响应」 |
 | 提示 403 `invalid-token` | DSH 重启后令牌轮换：刷新页面即可（客户端会自动重取一次令牌并重试一次） |
 | 提示 403 `cross-site-blocked` / `cross-origin-blocked` | 请求来源不是本页面（代理、反代改写 `Host`、或从别的站点触发） |
