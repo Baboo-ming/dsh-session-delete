@@ -70,44 +70,23 @@
 
 > 安装前**退出 DSH 桌面端**（CLI 写 profile 时会阻止 profile 启动）；想留后路就先备份 profile 里的 `package.json` 与 `pnpm-lock.yaml`。
 
-### 方式 A：从 GitHub 安装（普通用户走这条）
+### 安装命令
 
 ```powershell
 dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete           # 跟随 main 最新提交
 dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete#v0.1.2   # 固定到 release tag（推荐）
 ```
 
-- 走 GitHub 打好的 tarball（`codeload.github.com`），**用户本机不需要装 git**。本包没有运行期依赖（`package.json` 无 `dependencies`），装的就是这一个 tarball。已实测：`github:Baboo-ming/dsh-session-delete` 12 s 装完 `0.1.2`，`pnpm-lock.yaml` 把来源锁成提交 `defac52`。
+- 走 GitHub 打好的 tarball（`codeload.github.com`），**本机不需要装 git**。本包没有运行期依赖（`package.json` 无 `dependencies`），装的就是这一个 tarball。已实测：`github:Baboo-ming/dsh-session-delete` 12 s 装完 `0.1.2`，`pnpm-lock.yaml` 把来源锁成提交 `defac52`。
 - 不想开终端也可以：**设置 → 插件 → 安装**，粘贴 `github:Baboo-ming/dsh-session-delete`（同一套 spec 解析器）。
 - **升级**：换成新 tag 重跑一次（`…#v0.1.3`）。`github:` 依赖在 lockfile 里按**提交**锁定，不重跑、不换 tag 就一直是旧版本。
-- 同一套 spec 还接受 `git+https://github.com/…`、完整仓库 URL、`.tgz` 地址、registry 名（`dsh-session-delete@0.1.2`，前提是发过 npm）和本地绝对路径。
-
-### 方式 B：本地目录（只有作者 / 二次开发用）
-
-```powershell
-dsh plugin --profile desktop add "link:D:\AI_Work\开发\删除会话插件"
-```
-
-`link:` 建的是指向本项目目录的 junction，改代码不必重装，配合本节末尾的 `hmr.root` 即可热更新——**本机（开发机）用的就是这条**。普通用户**不要**走这个：它引用的是作者本机的绝对路径，在别人机器上根本解析不到（`dsh plugin add` 也要求本地路径必须是绝对路径，会直接报 `a local path must be absolute`）。
-
-### 方式 C：手动（CLI 不可用时）
-
-```powershell
-$NODE = "<DSH_HOME>\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
-$PNPM = "<DSH_HOME>\dsh-runtimes\dsh-primary-runtime\dependencies\pnpm\bin\pnpm.cjs"
-Set-Location "<DSH_HOME>\profiles\desktop"
-& $NODE $PNPM add "github:Baboo-ming/dsh-session-delete#v0.1.2"   # 本地开发改成 "link:<本项目绝对路径>"
-& $NODE $PNPM install                                            # 写 lockfile importer
-```
-
-然后把 `"dsh-session-delete"` **追加到 `dsh.profile.bundles` 数组末尾**（顺序即 bundle 层顺序）。
-
-**不要**再往 profile 自己的 `cordis.patch.yml` 里插一行同名插件：`cordis.patch.yml`（bundle patch）已经会插入，重复 id 会让加载器崩。
+- 同一套 spec 还接受 `git+https://github.com/…`、完整仓库 URL、`.tgz` 地址、registry 名（`dsh-session-delete@0.1.2`，前提是发过 npm）。
+- `dsh plugin add` 会自动把 `dsh-session-delete` 追加到 `dsh.profile.bundles`；**不要**再往 profile 自己的 `cordis.patch.yml` 里插一行同名插件：`cordis.patch.yml`（bundle patch）已经会插入，重复 id 会让加载器崩。
 
 ### 生效与验证
 
 - **首次安装**：本机实测**宿主半边不需要重启**——改 `dsh.profile.bundles` 会让 profile 实时重组并把插件挂上（`/session-delete/health` 立刻 200），客户端半边**刷新页面（F5）**即可看到菜单项。
-- **改完 `lib/` 之后要不要重启？** 取决于 profile 有没有把本目录加进 `hmr.root`：bundle 基础层把 `hmr.root` 设为 `[]`（模块根是 opt-in，见 `@deepseek-ai/dsh-base` 的 patch：`# Profile configuration reloads by default; module roots are opt-in.`），此时**必须完整重启 DSH** 才能加载新的宿主代码。想把宿主半边也变成热更新，就在 profile 的 `cordis.patch.yml` 里加一行（本机已按此配置，备份见 `cordis.patch.yml.bak-hmr-root-20261009`）：
+- **要让运行中的进程加载改过的宿主代码（`lib/`）**：bundle 基础层把 `hmr.root` 设为 `[]`（模块根是 opt-in，见 `@deepseek-ai/dsh-base` 的 patch：`# Profile configuration reloads by default; module roots are opt-in.`），所以默认**必须完整重启 DSH** 才会加载新代码。想改成热更新，就在 profile 的 `cordis.patch.yml` 里加一行（把 `root` 换成你的源码目录；本机已按此配置、备份见 `cordis.patch.yml.bak-hmr-root-20261009`）：
 
   ```yaml
   - id: hmr
@@ -129,11 +108,11 @@ Set-Location "<DSH_HOME>\profiles\desktop"
 
 - 然后在侧栏任意会话行点 `…` 找到「删除会话」。
 
-### 作者 / 维护者：发布与发版
+### 发布与发版（维护者）
 
 仓库：<https://github.com/Baboo-ming/dsh-session-delete>（MIT）。可公开的只有 `package.json`、`cordis.patch.yml`、`lib/`、`tools/`、`tests/`、`docs/`、`README.md`、`LICENSE`、`.gitignore`（共 24 个文件）。
 
-**不要**提交 `.ref/`——那是从 `resources/app.asar` 解包出来的 DSH 应用源码（本机 11,470 个文件 / 112.5 MB，属第三方代码），`.gitignore` 已排除。`docs/research/r1–r4.md` 是本项目自己写的研究笔记，但内含 DSH 内部源码的 `file:line` 引用与片段，公开前请自行过一遍（不想公开就把它加进 `.gitignore`）。本目录也没有 `node_modules`（依赖是装在 profile 里的 junction）。
+**不要**提交 `.ref/`——那是从 `resources/app.asar` 解包出来的 DSH 应用源码（本机 11,470 个文件 / 112.5 MB，属第三方代码），`.gitignore` 已排除。`docs/research/r1–r4.md` 是本项目自己写的研究笔记，但内含 DSH 内部源码的 `file:line` 引用与片段，公开前请自行过一遍（不想公开就把它加进 `.gitignore`）。本目录也没有 `node_modules`——依赖装在 profile 的 `node_modules` 里。
 
 发版流程（每次改完把 `package.json` 与 `lib/index.js` 的 `version` 一起升）：
 
@@ -161,7 +140,7 @@ dsh plugin --profile desktop remove dsh-session-delete
 
 1. 从 `dsh.profile.bundles` 里删掉 `"dsh-session-delete"`；
 2. `& $NODE $PNPM remove dsh-session-delete`（或直接恢复备份的 `package.json` / `pnpm-lock.yaml` 并 `pnpm install`）；
-3. 重启桌面端。`node_modules` 里是 junction，不会往项目目录写任何东西；本项目目录可整体删除。
+3. 重启桌面端。卸载只删 profile 里那份副本，不动任何会话数据；本项目目录可整体删除。
 
 ---
 
