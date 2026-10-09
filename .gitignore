@@ -1,0 +1,15 @@
+# Unpacked copy of the DSH application used as a read-only reference while
+# developing this plugin (third-party code — MUST NOT be published).
+.ref/
+
+# pnpm/node artifact: this package has no runtime dependencies, so nothing here
+# belongs in the repository. `dsh plugin add link:<this dir>` creates the
+# junction in the *profile's* node_modules, never in this directory.
+node_modules/
+pnpm-lock.yaml
+
+# Harness/editor leftovers
+*.tmp
+*.log
+.dsh-write-probe.tmp
+.DS_Store
