@@ -6,7 +6,7 @@
  * so no DSH process is needed.
  */
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -1029,4 +1029,86 @@ test('concurrent ledger-file edits lose no update and leave no temp files behind
   const strays = (await readdir(join(home, 'storages'))).filter((name) => name.includes('.tmp'))
   assert.deepEqual(strays, [], 'a unique temp name per writer must not leave orphans')
   await rm(home, { recursive: true, force: true })
+})
+
+/**
+ * Storage relocated to another volume: the visible session directory is only a
+ * link (junction) and the logs live behind it. `rm(link, { recursive: true })`
+ * removes the link and keeps every log file, so without follow-the-link
+ * handling the pipeline would report success while the logs survive.
+ */
+test('a session directory that is a link is deleted together with its payload', async (t) => {
+  const { home, dir } = await makeHome()
+  const payloadRoot = await mkdtemp(join(tmpdir(), 'session-delete-payload-'))
+  const payload = join(payloadRoot, encodeSegment(SESSION_ID))
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir'
+  try {
+    await mkdir(payload, { recursive: true })
+    await rename(join(dir, 'session.v4.jsonl.zstd'), join(payload, 'session.v4.jsonl.zstd'))
+    await rm(dir, { recursive: true, force: true })
+    try {
+      await symlink(payload, dir, linkType)
+    } catch (error) {
+      t.skip(`directory links unavailable here: ${error.message}`)
+      return
+    }
+
+    const { ctx } = makeCtx({ registry: false })
+    const { deleteSession, runtime } = createSessionDeleter(ctx, { dshHome: home })
+
+    const targets = await runtime.diskTargets(SESSION_ID)
+    assert.equal(targets.dirs[0]?.link, true, 'the preview flags the link so the dialog can warn')
+
+    const report = await deleteSession(SESSION_ID, {})
+    assert.equal(report.deleted, true)
+    const disk = report.stages.find((stage) => stage.key === 'disk-logs')
+    assert.equal(disk.status, 'ok')
+    assert.equal(disk.extra.removed[0].viaLink, true, 'the report records that the link was followed')
+    assert.equal(disk.extra.bytes, 4, 'the bytes reported are the real payload, not the link')
+
+    await assert.rejects(() => stat(dir), 'the link itself is gone')
+    await assert.rejects(
+      () => stat(join(payload, 'session.v4.jsonl.zstd')),
+      'the logs behind the link are gone too',
+    )
+  } finally {
+    await rm(home, { recursive: true, force: true })
+    await rm(payloadRoot, { recursive: true, force: true })
+  }
+})
+
+test('a link to a directory without session storage fails loudly and keeps the row', async (t) => {
+  const { home, dir } = await makeHome()
+  const payloadRoot = await mkdtemp(join(tmpdir(), 'session-delete-unrelated-'))
+  const unrelated = join(payloadRoot, 'unrelated-folder')
+  const linkType = process.platform === 'win32' ? 'junction' : 'dir'
+  try {
+    await mkdir(unrelated, { recursive: true })
+    await writeFile(join(unrelated, 'keep.txt'), 'not mine')
+    await rm(dir, { recursive: true, force: true })
+    try {
+      await symlink(unrelated, dir, linkType)
+    } catch (error) {
+      t.skip(`directory links unavailable here: ${error.message}`)
+      return
+    }
+
+    const { ctx } = makeCtx({ registry: false })
+    const { deleteSession } = createSessionDeleter(ctx, { dshHome: home })
+    const report = await deleteSession(SESSION_ID, {})
+
+    assert.equal(report.deleted, false, 'a delete that could not clear the logs is not a delete')
+    const disk = report.stages.find((stage) => stage.key === 'disk-logs')
+    assert.equal(disk.status, 'failed')
+    assert.match(disk.detail, /不是会话存储/, 'the refusal explains itself instead of "[object Object]"')
+    assert.equal(
+      report.stages.find((stage) => stage.key === 'broadcast').status,
+      'blocked',
+      'the row must stay visible while the logs are still on disk',
+    )
+    assert.ok((await stat(join(unrelated, 'keep.txt'))).isFile(), 'the unrelated directory is untouched')
+  } finally {
+    await rm(home, { recursive: true, force: true })
+    await rm(payloadRoot, { recursive: true, force: true })
+  }
 })

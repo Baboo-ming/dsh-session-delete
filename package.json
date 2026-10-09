@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-delete",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Permanently delete a DSH session from the sidebar session row menu (danger-styled) with a confirm modal and a seven-stage, independently-degrading deletion pipeline (validate → running guard → workspace ledger → archive set → on-disk logs → in-memory drop → broadcast).",
   "private": true,
   "type": "module",

@@ -10,7 +10,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, writeFile, readdir, stat, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, writeFile, readdir, stat, rm, symlink, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -448,7 +448,9 @@ async function makeTree() {
   await mkdir(dirB, { recursive: true })
   await mkdir(join(projectB, 'session-other'), { recursive: true })
   await writeFile(join(dirA, 'session.v4.jsonl.zstd'), 'x'.repeat(32))
-  await writeFile(join(dirA, 'session.v4.jsonl.lock'), '')
+  // The real lease file is exactly `session.lock` (dsh-session-persistence-jsonl
+  // `LEASE_FILENAME`), not a per-generation `<log>.lock`.
+  await writeFile(join(dirA, 'session.lock'), '')
   await writeFile(join(dirB, 'session.v3.jsonl'), 'y'.repeat(8))
   await writeFile(join(projectB, 'session-other', 'session.v4.jsonl'), 'z')
   return { root, projectA, projectB, dirA, dirB }
@@ -457,6 +459,9 @@ async function makeTree() {
 test('SESSION_LOG_PATTERN recognises every generation filename', () => {
   assert.ok(SESSION_LOG_PATTERN.test('session.v4.jsonl.zstd'))
   assert.ok(SESSION_LOG_PATTERN.test('session.v3.jsonl'))
+  // generation 0 keeps the versionless name (sessionFormatLogFilename(0))
+  assert.ok(SESSION_LOG_PATTERN.test('session.jsonl'))
+  assert.ok(SESSION_LOG_PATTERN.test('session.jsonl.zstd'))
   assert.ok(!SESSION_LOG_PATTERN.test('session.vX.jsonl'))
   assert.ok(!SESSION_LOG_PATTERN.test('other.v4.jsonl'))
 })
@@ -551,6 +556,131 @@ test('removeSessionDirs refuses unvalidated paths instead of deleting them', asy
     assert.ok((await stat(dirA)).isDirectory(), 'nothing was touched')
   } finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+/* --------------------------------------------- storage relocated elsewhere */
+
+/**
+ * The layout these tests pin down: the logs live on another volume and only a
+ * directory link (junction) is left in the visible session tree. `rm(dir,
+ * { recursive: true })` unlinks the *link* and leaves every file behind, so
+ * without explicit handling the delete would report success while the logs stay.
+ */
+const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir'
+
+async function makeLinkedTree(t, { targetName = SESSION, files = ['session.v4.jsonl.zstd'] } = {}) {
+  const root = await mkdtemp(join(tmpdir(), 'dsd-link-root-'))
+  const payloadRoot = await mkdtemp(join(tmpdir(), 'dsd-link-payload-'))
+  const payload = join(payloadRoot, targetName)
+  const project = join(root, '--D-AI_Work--')
+  await mkdir(project, { recursive: true })
+  await mkdir(payload, { recursive: true })
+  for (const name of files) await writeFile(join(payload, name), 'x'.repeat(16))
+  const linkPath = join(project, SESSION)
+  try {
+    await symlink(payload, linkPath, LINK_TYPE)
+  } catch (error) {
+    await rm(root, { recursive: true, force: true })
+    await rm(payloadRoot, { recursive: true, force: true })
+    t.skip(`directory links unavailable here: ${error.message}`)
+    return undefined
+  }
+  return { root, project, payload, payloadRoot, linkPath }
+}
+
+test('findSessionDirs discovers a session directory that is a link', async (t) => {
+  const tree = await makeLinkedTree(t)
+  if (!tree) return
+  try {
+    const found = await findSessionDirs(tree.root, SESSION)
+    assert.deepEqual(found.dirs, [tree.linkPath])
+    assert.equal(found.scanned, 1)
+  } finally {
+    await rm(tree.root, { recursive: true, force: true })
+    await rm(tree.payloadRoot, { recursive: true, force: true })
+  }
+})
+
+test('removeSessionDirs deletes a linked session dir *and* its real payload', async (t) => {
+  const tree = await makeLinkedTree(t)
+  if (!tree) return
+  try {
+    const target = await realpath(tree.payload)
+    const result = await removeSessionDirs(tree.root, SESSION, [tree.linkPath])
+    assert.deepEqual(result.failed, [])
+    assert.equal(result.removed.length, 1)
+    assert.equal(result.removed[0].viaLink, true, 'the report says the link was followed')
+    assert.equal(result.removed[0].scoped, false, 'a target named after the session goes entirely')
+    assert.equal(result.removed[0].target, target)
+    assert.equal(result.removed[0].summary.bytes, 16, 'the summary describes the real files')
+    await assert.rejects(() => stat(tree.linkPath), 'the link is gone')
+    await assert.rejects(() => stat(tree.payload), 'the directory behind the link is gone too')
+  } finally {
+    await rm(tree.root, { recursive: true, force: true })
+    await rm(tree.payloadRoot, { recursive: true, force: true })
+  }
+})
+
+test('a link to a differently named directory loses its session files, keeps the rest', async (t) => {
+  const tree = await makeLinkedTree(t, {
+    targetName: 'relocated-storage',
+    files: ['session.v4.jsonl.zstd', 'session.lock', 'notes.md'],
+  })
+  if (!tree) return
+  try {
+    const result = await removeSessionDirs(tree.root, SESSION, [tree.linkPath])
+    assert.deepEqual(result.failed, [])
+    assert.equal(result.removed.length, 1)
+    assert.equal(result.removed[0].scoped, true, 'only the session artifacts are removed')
+    assert.deepEqual(result.removed[0].leftover, ['notes.md'], 'foreign files are reported, not deleted')
+    assert.ok((await stat(join(tree.payload, 'notes.md'))).isFile(), 'the user file survives')
+    await assert.rejects(() => stat(join(tree.payload, 'session.v4.jsonl.zstd')), 'the log is gone')
+    await assert.rejects(() => stat(join(tree.payload, 'session.lock')), 'the lock is gone')
+    await assert.rejects(() => stat(tree.linkPath), 'the link is gone')
+  } finally {
+    await rm(tree.root, { recursive: true, force: true })
+    await rm(tree.payloadRoot, { recursive: true, force: true })
+  }
+})
+
+test('removeSessionDirs refuses a link whose target holds no session storage', async (t) => {
+  const tree = await makeLinkedTree(t, { targetName: 'unrelated-folder', files: ['keep.txt'] })
+  if (!tree) return
+  try {
+    const result = await removeSessionDirs(tree.root, SESSION, [tree.linkPath])
+    assert.equal(result.removed.length, 0)
+    assert.equal(result.failed.length, 1)
+    assert.match(result.failed[0].error, /不是会话存储/)
+    assert.ok((await stat(join(tree.payload, 'keep.txt'))).isFile(), 'unrelated directory untouched')
+  } finally {
+    await rm(tree.root, { recursive: true, force: true })
+    await rm(tree.payloadRoot, { recursive: true, force: true })
+  }
+})
+
+test('a linked session dir is still found when the link sits one level higher', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'dsd-link-proj-'))
+  const payload = await mkdtemp(join(tmpdir(), 'dsd-link-proj-payload-'))
+  const projectLink = join(root, '--D-AI_Work--')
+  try {
+    await mkdir(join(payload, SESSION), { recursive: true })
+    await writeFile(join(payload, SESSION, 'session.v4.jsonl.zstd'), 'x'.repeat(8))
+    try {
+      await symlink(payload, projectLink, LINK_TYPE)
+    } catch (error) {
+      t.skip(`directory links unavailable here: ${error.message}`)
+      return
+    }
+    // No cwd hint at all: discovery has to walk the project link itself.
+    const found = await findSessionDirs(root, SESSION, { cwds: [] })
+    assert.deepEqual(found.dirs, [join(projectLink, SESSION)])
+    const result = await removeSessionDirs(root, SESSION, found.dirs)
+    assert.deepEqual(result.failed, [])
+    await assert.rejects(() => stat(join(payload, SESSION)), 'the real session dir is gone')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await rm(payload, { recursive: true, force: true })
   }
 })
 

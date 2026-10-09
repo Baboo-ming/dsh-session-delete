@@ -1,13 +1,13 @@
 # dsh-session-delete
 
-当前版本 **0.1.1**（0.1.0 → 0.1.1：修掉「宿主 dispose 写回投影缓存」的时序缺陷，见 §8 第 18 条）。
+当前版本 **0.1.2**（0.1.1 → 0.1.2：会话数据搬到别的盘、原位置只留目录链接（junction/符号链接）时也能删干净，见 §8 第 19–20 条；0.1.0 → 0.1.1：修掉「宿主 dispose 写回投影缓存」的时序缺陷，见 §8 第 18 条）。
 
 把「删除会话」做成的 DSH 插件：**侧栏会话行 `…` 菜单注入红色危险项 → 二次确认模态框 → 七阶段删除流水线 → 广播事件并刷新侧栏**。
 删除是**永久**的：会话日志会从磁盘上消失，无法用「撤销」找回。
 
 - 宿主半边（Node）：`lib/index.js` + `lib/host/*` + `lib/core/*` —— 拥有文件系统与宿主服务，通过自建 HTTP 路由暴露能力。
 - 浏览器半边（预构建懒加载 CJS）：`lib/client.js` —— 注入菜单项、确认模态、toast，并调用 `sessions.refresh()`。
-- 状态：核心/宿主/客户端三层共 **70 个测试全部通过**（`node --test "tests/*.test.js"`，core 32 + host 27 + client 11），`tools/doctor.mjs` 在临时 DSH home 上跑通完整七阶段流水线，并由**三次**独立只读对抗式审计逐条复核需求、宿主 API 与绕过面（审计提出的 1 个 blocker + 3 个 major + 其余 minor/info 已全部处理，见 §8）。**已在真实 DSH（desktop profile）里完成端到端验证**：侧栏出现红色「删除会话」、确认后行当场消失、磁盘目录/挂账/投影缓存全部清掉（记录见 §7 末尾）。
+- 状态：核心/宿主/客户端三层共 **77 个测试全部通过**（`node --test "tests/*.test.js"`，core 37 + host 29 + client 11），`tools/doctor.mjs` 在临时 DSH home 上跑通完整七阶段流水线，并由**三次**独立只读对抗式审计逐条复核需求、宿主 API 与绕过面（审计提出的 1 个 blocker + 3 个 major + 其余 minor/info 已全部处理，见 §8）。**已在真实 DSH（desktop profile）里完成端到端验证**：侧栏出现红色「删除会话」、确认后行当场消失、磁盘目录/挂账/投影缓存全部清掉（记录见 §7 末尾）。
 
 ---
 
@@ -103,12 +103,12 @@ Set-Location "C:\Users\ming\.dsh\profiles\desktop"
         - "D:/AI_Work/开发/删除会话插件/lib"
   ```
 
-  之后 `dsh-hmr` 会监视 `lib/`：改动任一模块（含 mtime 变化）都会清掉该模块图的 ESM/CJS 缓存、重新 import 入口，并把新插件热替换进同一个 entry（token 会轮换，客户端遇到 403 `invalid-token` 会自动重新取一次）。本机验证方式：把 `lib/index.js` 的 `version` 从 `0.1.0` 提到 `0.1.1` 并 touch `lib/**/*.js`，约 3 秒后 `/session-delete/health` 就返回 `0.1.1`。改 `lib/client.js` 仍由 `dsh-client-hmr`（500 ms 轮询）热替换，或直接刷新页面。
+  之后 `dsh-hmr` 会监视 `lib/`：改动任一模块（含 mtime 变化）都会清掉该模块图的 ESM/CJS 缓存、重新 import 入口，并把新插件热替换进同一个 entry（token 会轮换，客户端遇到 403 `invalid-token` 会自动重新取一次）。本机验证方式：把 `lib/index.js` 的 `version` 提到新值（如 `0.1.2`）并 touch `lib/**/*.js`，约 3 秒后 `/session-delete/health` 就返回新版本号。改 `lib/client.js` 仍由 `dsh-client-hmr`（500 ms 轮询）热替换，或直接刷新页面。
 - 验证宿主已挂载：
 
   ```powershell
   Invoke-RestMethod http://127.0.0.1:19387/session-delete/health
-  # -> { ok: true, value: { name: 'dsh-session-delete', version: '0.1.1', token: '<uuid>', requireToken: true } }
+  # -> { ok: true, value: { name: 'dsh-session-delete', version: '0.1.2', token: '<uuid>', requireToken: true } }
   ```
 
   `version` 同时是「运行中的进程加载的是哪一代代码」的判据。
@@ -126,7 +126,7 @@ Set-Location "C:\Users\ming\.dsh\profiles\desktop"
 ```powershell
 git init
 git add -A
-git commit -m "dsh-session-delete 0.1.1"
+git commit -m "dsh-session-delete 0.1.2"
 git remote add origin https://github.com/<you>/dsh-session-delete.git
 git push -u origin main
 ```
@@ -219,7 +219,7 @@ dsh plugin --profile desktop remove dsh-session-delete
 ```powershell
 # 打包运行时的 node（本机实测路径；DSH 安装体内的 primary-runtime 同样可用）
 $NODE = "C:\Users\ming\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
-& $NODE --test "tests/*.test.js"                 # 70 passed（core 32 + host 27 + client 11）
+& $NODE --test "tests/*.test.js"                 # 77 passed（core 37 + host 29 + client 11）
 & $NODE tools/doctor.mjs --live --busy --force   # 临时 home 上跑一遍完整流水线并打印报告
 ```
 
@@ -235,13 +235,14 @@ $NODE = "C:\Users\ming\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\b
 
 | 验证项 | 实测结果 |
 |--------|----------|
-| 宿主半边是否需重启 | **不需要**：改 `bundles` 触发 profile 实时重组，`GET http://127.0.0.1:19387/session-delete/health` → 200 `{name:'dsh-session-delete',version:'0.1.0',token:'<uuid>',requireToken:true}`（加 `hmr.root` 后热更新到 `0.1.1`，见 §3） |
+| 宿主半边是否需重启 | **不需要**：改 `bundles` 触发 profile 实时重组，`GET http://127.0.0.1:19387/session-delete/health` → 200 `{name:'dsh-session-delete',version:'0.1.0',token:'<uuid>',requireToken:true}`（加 `hmr.root` 后热更新到 `0.1.1`，再 `0.1.2`，见 §3） |
 | 客户端半边 | 刷新页面（F5）后，会话行 `…` 菜单里出现**红色「删除会话」** |
 | 预览接口读真实数据 | 对一个真实会话（1 个 `session.v4.jsonl.zstd`、27,561 B）返回 `dirs`（`generation: v4`、`locked: false`）、`cwds`、`workspaces`（`workspaceId 38b23fb6-…`、title「删除会话插件」）、`registryAvailable/forceAllowed: true`；对**正在跑 turn + pwsh 任务**的会话返回 `activity: [{kind:'turn'},{kind:'job',items:[…]}]` ⇒ 活动探测真实可用 |
 | 界面删除（用户操作） | 对新建的测试会话 `Greeting`（`session-92b15655-d3a4-46b4-8c89-9c58fb044938`）点「删除会话」→ 确认：**行当场消失**，右下角出现绿色**「会话已删除」** |
 | 会话目录 | `sessions\--D-AI_Work-~5F00~53D1-~5220~9664~4F1A~8BDD~63D2~4EF6--\session-92b15655-…`（1 file / 27,561 B）→ 确认后 **27.1 s 内实测消失**，之后不再出现 |
 | 工作区挂账 | `workspace.json`：`tables.workspaces['38b23fb6-…'].sessionIds` 由 `['session-92b15655-…','session-e5594e8a-…']` → `['session-e5594e8a-…']`，整个文件已不含该 id；`global.archivedSessionIds` 未被波及；`updatedAt` 为 ISO 字符串 |
 | 投影缓存 | 旧代码在此暴露一个真缺陷：摘除后宿主又写回了缓存文件（10:59:00，比删除晚约 27 s，里面还带着 `Greeting` 标题）⇒ 已修（第 6 阶段摘除后重扫，见 §8 第 18 条）；遗留的孤儿文件已手工清除，其后 12 s 未被重写 |
+| 会话数据搬到别的盘（目录链接） | `0.1.2` 用 `mklink /J` 造出 6 种布局逐一实测：`home` 整体 junction、`sessions` 根 junction、项目目录 junction、会话目录 junction（目标名 = 会话 ID）以及会话目录 junction（目标名**任意**，走「只删会话文件」的保守路径）⇒ 六种全部 `deleted: true`，链接与其真实负载一并清除，工作区挂账与投影缓存清空；只有「链接指向一个不含任何会话文件的无关目录」时如实 `failed`（`磁盘日志删除：1 项失败（首项：目录链接的目标不是会话存储…）`）且第 7 阶段 `blocked`——行不消失、无关目录分毫未动（见 §8 第 19–20 条） |
 
 > 说明：DSH 自己的 `/`、`/api/boot` 走 `connection.admit`（未带凭据一律 401），所以「页面真的渲染出菜单、点确认真的删掉」只能由浏览器侧确认——上表第 2、4 行就是浏览器侧的人工确认结果。
 
@@ -267,6 +268,8 @@ $NODE = "C:\Users\ming\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\b
 16. **插槽注册的卸载幂等**：`slots.inject` 返回的 disposer 与插件自身 scope 可能都触发卸载，客户端因此用一次性标志 + 逐个 `try/catch` 调用，避免「已释放」异常逃出卸载路径。
 17. **客户端测试的边界**：`tests/client-bundle.test.js` 用自建 hook 运行时驱动真实渲染状态，但它仍不是浏览器——没有 DOM、没有真实 `Modal` 焦点管理/Escape、没有真实 `fetch` 与 React 调度，因此「菜单项真的出现在侧栏、弹窗外观、`sessions.refresh()` 真的刷新了列表」只能在真实 DSH 进程 + 浏览器里验证。**已在真实 DSH 里做过一轮（见 §7 末尾）**，但每次改动客户端后仍建议复验一次。
 18. **投影缓存必须在内存摘除之后重扫一次**：`session_projcache` 的 domain 记录删掉不等于文件消失——宿主在会话 dispose 时会再写一份最终 projection 快照。真实环境实测：删除成功约 27 s 后，`<storagesRoot>\session_projcache\sessions\<id>.json` 又被写回（内容里还带着会话标题），而 `workspaceRegistry` 的 header 缓存因此继续报 `sessionKnown(id) === true`（`dsh-workspace/lib/index.js:612-617` 的缓存 `headers` 从不按 id 逐条清理）。所以第 5 阶段改成「domain 记录 + 文件」两条路都删，第 6 阶段摘除后再扫一遍，兜住这次写回。
+19. **会话目录是目录链接时，必须连链接目标一起删**：用户把会话数据搬到 D:/E: 盘、在原来的位置只留 `mklink /J`（junction）是很自然的做法，而 `fs.rm(dir, { recursive: true })` 遇到 reparse point **只解开链接、不删目标**——实测（Windows `mklink /J`）会留下全部日志文件，旧行为却报告成功：一次「删掉了」的假象。`0.1.2` 因此先 `lstat` 判链接、`realpath` 解析目标，再按目标名分两种策略执行：目标名 == 会话 ID（`encodeSegment(sessionId)`，宿主自己的布局）→ 递归删目标；目标名任意 → **只删目标目录里的会话文件**（`session.jsonl` / `session.v(N).jsonl` + 可选 `.zstd` / `.tmp`、`session.lock`），随后 `rmdir` 目标（只在变空时成功），其余文件原样保留并写进报告 `leftover`；链接指向的目录里**一个会话文件都没有**（= 无关目录或恶意链接）→ 直接拒绝，不递归。链接始终在负载之后才删：负载被占用时链接仍在，第 6 阶段的 `leftover` 重试才有路径可打。
+20. **`session.lock` 是真名，别猜成 `<日志>.lock`**：`dsh-session-persistence-jsonl/lib/index.js:643` 的 `LEASE_FILENAME = "session.lock"`（`:667` 拼成 `join(dir, LEASE_FILENAME)`），所以预览里的 `locked` 只认 `session.lock` / `session.v(N).lock` 两种名字；`session.v4.jsonl.lock` 这种臆造名既不会被判锁、也不会被第 5 阶段顺手带走（它不在会话文件白名单里）。同时日志名补齐了第 0 代：`sessionFormatLogFilename(0)` 返回 `session.jsonl`（无 `.vN`），`SESSION_LOG_PATTERN` 已放宽成 `/^session(\.v\d+)?\.jsonl(\.zstd)?$/`。失败详情也不再打印 `[object Object]`（`removeSessionDirs` 的失败项里 `error` 是字符串、服务失败是 `Error` 对象，展示层两种都要认）。
 
 ---
 
@@ -281,6 +284,7 @@ $NODE = "C:\Users\ming\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\b
 | 会话删掉又“复活” | 第 3 阶段失败（挂账没清干净）——宿主日志搜 `[session-delete]`；`workspace.json` 是否可写 |
 | 提示部分降级 | 报告里 `warnings` / 各阶段 `status`：`skipped` = 能力缺失，`failed` = 真失败，`blocked` = gate 拒绝或“磁盘没清干净所以不广播”（见 §8 第 14 条） |
 | 磁盘上还有残留目录 | 文件被占用（宿主仍开着句柄）：关闭该会话后再删，或重启 DSH 后重试；预览里若提示锁文件，先关闭该会话 |
+| 会话数据搬到 D:/E: 盘后删不掉 | `0.1.2` 会跟随目录链接删除（见 §8 第 19 条）。若报「目录链接的目标不是会话存储」，说明该链接指向的目录里没有任何 `session*.jsonl*` / `session.lock`——插件拒绝递归删除无关目录；请自行确认该链接是否指错，或删掉链接后重试 |
 | 运行中的会话删不掉 | 这是设计行为：默认必须显式 `force`；要彻底禁止就配 `allowForce: false` |
 
 ---
