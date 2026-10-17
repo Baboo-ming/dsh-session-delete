@@ -1,6 +1,6 @@
 # dsh-session-delete
 
-当前版本 **0.2.1**（0.2.0 → 0.2.1：工作区行菜单文案改为「删除所有会话（N）」；0.1.2 → 0.2.0：新增「删除当前工作区的所有会话」——工作区行 `…` 菜单里的批量红色危险项、带计数的预览、后台任务与进度/失败明细，见 §1.1；0.1.1 → 0.1.2：会话数据搬到别的盘、原位置只留目录链接（junction/符号链接）时也能删干净，见 §8 第 19–20 条；0.1.0 → 0.1.1：修掉「宿主 dispose 写回投影缓存」的时序缺陷，见 §8 第 18 条）。
+当前版本 **0.2.2**（0.2.1 → 0.2.2：工作区行菜单项去掉会话计数，固定显示「删除所有会话」；0.2.0 → 0.2.1：工作区行菜单文案定为「删除所有会话」；0.1.2 → 0.2.0：新增「删除当前工作区的所有会话」——工作区行 `…` 菜单里的批量红色危险项、带计数的预览、后台任务与进度/失败明细，见 §1.1；0.1.1 → 0.1.2：会话数据搬到别的盘、原位置只留目录链接（junction/符号链接）时也能删干净，见 §8 第 19–20 条；0.1.0 → 0.1.1：修掉「宿主 dispose 写回投影缓存」的时序缺陷，见 §8 第 18 条）。
 
 把「删除会话」做成 DSH 插件：**侧栏会话行 `…` 菜单注入红色危险项 → 二次确认模态框 → 七阶段删除流水线 → 广播事件并刷新侧栏**；同一套流水线也支持在**工作区行 `…` 菜单**里一次删掉该工作区的全部会话（逐个执行、后台任务、可关窗、失败逐条报告）。
 删除是**永久**的：会话日志会从磁盘上消失，无法用「撤销」找回。
@@ -39,7 +39,7 @@
 
 ### 1.1 删除当前工作区的所有会话（0.2.0）
 
-1. **工作区行的 `…` 菜单**里出现 **「删除所有会话（N）」**（复用菜单里删除工作区那行的危险样式；N 取自客户端工作区注册表，取不到时显示不带计数的文案）。
+1. **工作区行的 `…` 菜单**里出现 **「删除所有会话」**（复用菜单里删除工作区那行的危险样式）。
 2. 点击后关闭菜单并打开确认模态框，先调用 `POST /session-delete/workspace/preview` 拉取预览：
    - 工作区标题与路径、会话总数；
    - 其中多少会话在**运行中**（有活动即视为运行中，确认按钮切换成 force 变体）、多少在归档集合中；
@@ -89,12 +89,12 @@
 
 ```powershell
 dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete           # 跟随 main 最新提交
-dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete#v0.2.1   # 固定到 release tag（推荐）
+dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete#v0.2.2   # 固定到 release tag（推荐）
 ```
 
 - 走 GitHub 打好的 tarball（`codeload.github.com`），**本机不需要装 git**。本包没有运行期依赖（`package.json` 无 `dependencies`），装的就是这一个 tarball。已实测：`github:Baboo-ming/dsh-session-delete` 12 s 装完 `0.1.2`，`pnpm-lock.yaml` 把来源锁成提交 `defac52`。
 - 不想开终端也可以：**设置 → 插件 → 安装**，粘贴 `github:Baboo-ming/dsh-session-delete`（同一套 spec 解析器）。
-- **升级**：换成新 tag 重跑一次（`…#v0.2.1`）。`github:` 依赖在 lockfile 里按**提交**锁定，不重跑、不换 tag 就一直是旧版本。
+- **升级**：换成新 tag 重跑一次（`…#v0.2.2`）。`github:` 依赖在 lockfile 里按**提交**锁定，不重跑、不换 tag 就一直是旧版本。
 - 同一套 spec 还接受 `git+https://github.com/…`、完整仓库 URL、`.tgz` 地址、registry 名（`dsh-session-delete@0.1.2`，前提是发过 npm）。
 - `dsh plugin add` 会自动把 `dsh-session-delete` 追加到 `dsh.profile.bundles`；**不要**再往 profile 自己的 `cordis.patch.yml` 里插一行同名插件：`cordis.patch.yml`（bundle patch）已经会插入，重复 id 会让加载器崩。
 
@@ -116,7 +116,7 @@ dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete#v0.2.1   #
 
   ```powershell
   Invoke-RestMethod http://127.0.0.1:19387/session-delete/health
-  # -> { ok: true, value: { name: 'dsh-session-delete', version: '0.2.1', token: '<uuid>', requireToken: true } }
+  # -> { ok: true, value: { name: 'dsh-session-delete', version: '0.2.2', token: '<uuid>', requireToken: true } }
   ```
 
   `version` 同时是「运行中的进程加载的是哪一代代码」的判据。
@@ -133,15 +133,15 @@ dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete#v0.2.1   #
 
 ```powershell
 git add -A
-git commit -m "dsh-session-delete 0.2.1"
+git commit -m "dsh-session-delete 0.2.2"
 git push origin main
-git tag -a v0.2.1 -m "dsh-session-delete 0.2.1"
-git push origin v0.2.1
+git tag -a v0.2.2 -m "dsh-session-delete 0.2.2"
+git push origin v0.2.2
 ```
 
-推完 tag，用户就能用 `github:Baboo-ming/dsh-session-delete#v0.2.1` 安装或升级到这一版（不打 tag 也能装，但锁的是某个提交，不好核对版本）。
+推完 tag，用户就能用 `github:Baboo-ming/dsh-session-delete#v0.2.2` 安装或升级到这一版（不打 tag 也能装，但锁的是某个提交，不好核对版本）。
 
-> `package.json` 里的 `"private": true` 只挡 `npm publish`，不影响 `github:` / `link:` 安装；哪天想同时发 npm，把它改成 `false`，用户就能 `dsh plugin --profile desktop add dsh-session-delete@0.2.1`。
+> `package.json` 里的 `"private": true` 只挡 `npm publish`，不影响 `github:` / `link:` 安装；哪天想同时发 npm，把它改成 `false`，用户就能 `dsh plugin --profile desktop add dsh-session-delete@0.2.2`。
 
 ---
 

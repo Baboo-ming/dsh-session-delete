@@ -1,0 +1,6 @@
+url: https://github.com/Baboo-ming/dsh-session-delete
+name: Baboo-ming/dsh-session-delete
+category: session
+description:
+  en: Adds a danger-styled Delete session item to the sidebar session menu, and a Delete all sessions item to the workspace row menu. After a confirmation dialog it removes the session's logs under .dsh/sessions, its workspace entry, archive and pin flags, projection cache and in-memory record, then broadcasts the removal to the client; workspace batch delete runs the same pipeline as a background host job with progress polling.
+  zh: 在侧栏会话菜单中加入红色「删除会话」项，并在工作区行「…」菜单中加入「删除所有会话」：二次确认后彻底移除会话，包括 .dsh/sessions 下的磁盘日志、工作区挂账条目、归档与置顶标记、投影缓存和内存中的会话记录，并广播删除事件通知客户端；工作区批量删除由宿主端后台任务逐个执行同一套流水线，客户端轮询进度。
