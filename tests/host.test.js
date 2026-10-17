@@ -1112,3 +1112,247 @@ test('a link to a directory without session storage fails loudly and keeps the r
     await rm(payloadRoot, { recursive: true, force: true })
   }
 })
+
+test('previewWorkspace reports every session of the workspace', async () => {
+  const { home, workspaceFile } = await makeHome()
+  const { ctx } = makeCtx({ live: true, activity: [{ kind: 'turn' }] })
+  const { runtime } = createSessionDeleter(ctx, { dshHome: home })
+
+  const preview = await runtime.previewWorkspace(WORKSPACE_ID)
+
+  assert.equal(preview.valid, true)
+  assert.equal(preview.workspaceId, WORKSPACE_ID)
+  assert.equal(preview.title, '删除会话插件')
+  assert.equal(preview.path, CWD)
+  assert.equal(preview.source, 'registry')
+  assert.equal(preview.count, 2)
+  assert.equal(preview.runningCount, 1)
+  assert.equal(preview.archivedCount, 1)
+  assert.equal(preview.pinnedCount, 1)
+  assert.equal(preview.totalBytes, 4)
+  assert.equal(preview.totalFiles, 2)
+  assert.equal(preview.forceAllowed, true)
+  assert.equal(preview.paths.ledgerFile, workspaceFile)
+  assert.deepEqual(preview.sessions.map((session) => session.sessionId), [SESSION_ID, 'session-keep-me'])
+
+  const running = preview.sessions[0]
+  assert.equal(running.live, true)
+  assert.equal(running.known, true)
+  assert.equal(running.activity, 1)
+  assert.equal(running.activitySupported, true)
+  assert.equal(running.archived, true)
+  assert.equal(running.pinned, true)
+  assert.equal(running.bytes, 4)
+  assert.equal(running.files, 2)
+  assert.equal(running.dirs, 1)
+  assert.equal(running.cwd, CWD)
+
+  // a session listed in the ledger but with no disk trace still shows up: the
+  // workspace preview must count it, otherwise the batch dialog promises less
+  // than the job will try to delete.
+  const idle = preview.sessions[1]
+  assert.equal(idle.live, false)
+  assert.equal(idle.known, false)
+  assert.equal(idle.activity, 0)
+  assert.equal(idle.activitySupported, false)
+  assert.equal(idle.archived, false)
+  assert.equal(idle.pinned, false)
+  assert.equal(idle.bytes, 0)
+  assert.equal(idle.files, 0)
+  assert.equal(idle.dirs, 0)
+  assert.equal(idle.cwd, undefined)
+
+  const invalid = await runtime.previewWorkspace('')
+  assert.equal(invalid.valid, false)
+  assert.equal(invalid.count, 0)
+  assert.equal(invalid.error, '工作区 ID 缺失或非法')
+
+  const unknown = await runtime.previewWorkspace('ws-missing')
+  assert.equal(unknown.valid, false)
+  assert.equal(unknown.error, '工作区不存在（可能已删除）')
+
+  await rm(home, { recursive: true, force: true })
+})
+
+test('previewWorkspace falls back to the ledger file without a registry', async () => {
+  const { home } = await makeHome()
+  const { ctx } = makeCtx({ registry: false })
+  const { runtime } = createSessionDeleter(ctx, { dshHome: home })
+
+  const preview = await runtime.previewWorkspace(WORKSPACE_ID)
+
+  assert.equal(preview.valid, true)
+  assert.equal(preview.source, 'file')
+  assert.equal(preview.count, 2)
+  assert.equal(preview.runningCount, 0)
+  assert.equal(preview.archivedCount, 1)
+  assert.equal(preview.pinnedCount, 1)
+  assert.equal(
+    preview.sessions.find((session) => session.sessionId === SESSION_ID).archived,
+    true,
+  )
+  assert.equal(
+    preview.sessions.find((session) => session.sessionId === 'session-keep-me').archived,
+    false,
+  )
+  await rm(home, { recursive: true, force: true })
+})
+
+test('http: workspace batch preview, delete job and status polling clear the whole workspace', async () => {
+  const { home, dir, workspaceFile } = await makeHome()
+  const { ctx } = makeCtx({ registry: false })
+  const deleter = createSessionDeleter(ctx, { dshHome: home })
+  const call = (options) => callHandler(deleter.handler, { token: deleter.token, ...options })
+
+  const preview = await call({
+    method: 'POST',
+    url: '/session-delete/workspace/preview',
+    body: { workspaceId: WORKSPACE_ID },
+  })
+  assert.equal(preview.statusCode, 200)
+  assert.equal(preview.payload.value.valid, true)
+  assert.equal(preview.payload.value.count, 2)
+  assert.deepEqual(
+    preview.payload.value.sessions.map((session) => session.sessionId),
+    [SESSION_ID, 'session-keep-me'],
+  )
+
+  const started = await call({
+    method: 'POST',
+    url: '/session-delete/workspace/delete',
+    body: { workspaceId: WORKSPACE_ID },
+  })
+  assert.equal(started.statusCode, 200)
+  assert.equal(started.payload.ok, true)
+  const jobId = started.payload.value.jobId
+  assert.equal(typeof jobId, 'string')
+  assert.equal(started.payload.value.workspaceId, WORKSPACE_ID)
+  assert.equal(started.payload.value.total, 2)
+
+  // poll exactly like the client: the delete route answers before the job runs
+  let job
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const status = await call({
+      method: 'POST',
+      url: '/session-delete/workspace/status',
+      body: { jobId },
+    })
+    assert.equal(status.statusCode, 200)
+    job = status.payload.value
+    if (job.state !== 'running') break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+
+  assert.equal(job.state, 'done')
+  assert.equal(job.workspaceId, WORKSPACE_ID)
+  assert.equal(job.total, 2)
+  assert.equal(job.completed, 2)
+  assert.equal(job.deleted, 2)
+  assert.deepEqual(job.failed, [])
+  assert.equal(job.current, null)
+  assert.equal(job.error, null)
+  assert.equal(job.force, false)
+  assert.equal(typeof job.finishedAt, 'number')
+
+  // both ids are gone from the ledger, not just the one with a disk trace
+  const ledger = JSON.parse(await readFile(workspaceFile, 'utf8'))
+  assert.deepEqual(ledger.tables.workspaces[WORKSPACE_ID].sessionIds, [])
+  assert.deepEqual(ledger.global.archivedSessionIds, [])
+  assert.deepEqual(ledger.global.pinnedSessionIds, [])
+  assert.equal(await exists(dir), false)
+
+  const missing = await call({
+    method: 'POST',
+    url: '/session-delete/workspace/status',
+    body: { jobId: 'no-such-job' },
+  })
+  assert.equal(missing.statusCode, 404)
+  assert.equal(missing.payload.error.code, 'unknown-job')
+
+  const invalid = await call({ method: 'POST', url: '/session-delete/workspace/status', body: {} })
+  assert.equal(invalid.statusCode, 400)
+  assert.equal(invalid.payload.error.code, 'invalid-job')
+
+  await rm(home, { recursive: true, force: true })
+})
+
+test('http: workspace routes enforce the token, ids and the empty-workspace guard', async () => {
+  const { home, dir } = await makeHome()
+  const { ctx, records } = makeCtx()
+  records.set('ws-empty', { path: CWD, title: '空工作区', sessionIds: [], createdAt: 1, updatedAt: 1 })
+  const deleter = createSessionDeleter(ctx, { dshHome: home })
+  const call = (options) => callHandler(deleter.handler, { token: deleter.token, ...options })
+
+  const noTokenPreview = await callHandler(deleter.handler, {
+    method: 'POST',
+    url: '/session-delete/workspace/preview',
+    body: { workspaceId: WORKSPACE_ID },
+  })
+  assert.equal(noTokenPreview.statusCode, 403)
+  assert.equal(noTokenPreview.payload.error.code, 'invalid-token')
+
+  const noTokenDelete = await callHandler(deleter.handler, {
+    method: 'POST',
+    url: '/session-delete/workspace/delete',
+    body: { workspaceId: WORKSPACE_ID },
+  })
+  assert.equal(noTokenDelete.statusCode, 403)
+  assert.equal(noTokenDelete.payload.error.code, 'invalid-token')
+
+  const invalid = await call({
+    method: 'POST',
+    url: '/session-delete/workspace/delete',
+    body: { workspaceId: '../evil' },
+  })
+  assert.equal(invalid.statusCode, 400)
+  assert.equal(invalid.payload.error.code, 'invalid-workspace')
+
+  const missingId = await call({
+    method: 'POST',
+    url: '/session-delete/workspace/preview',
+    body: {},
+  })
+  assert.equal(missingId.statusCode, 400)
+  assert.equal(missingId.payload.error.code, 'invalid-workspace')
+
+  const unknown = await call({
+    method: 'POST',
+    url: '/session-delete/workspace/delete',
+    body: { workspaceId: 'ws-missing' },
+  })
+  assert.equal(unknown.statusCode, 404)
+  assert.equal(unknown.payload.error.code, 'unknown-workspace')
+
+  const unknownPreview = await call({
+    method: 'POST',
+    url: '/session-delete/workspace/preview',
+    body: { workspaceId: 'ws-missing' },
+  })
+  assert.equal(unknownPreview.statusCode, 404)
+  assert.equal(unknownPreview.payload.error.code, 'unknown-workspace')
+
+  const empty = await call({
+    method: 'POST',
+    url: '/session-delete/workspace/delete',
+    body: { workspaceId: 'ws-empty' },
+  })
+  assert.equal(empty.statusCode, 409)
+  assert.equal(empty.payload.error.code, 'empty-workspace')
+
+  const wrongMethod = await call({ method: 'GET', url: '/session-delete/workspace/preview' })
+  assert.equal(wrongMethod.statusCode, 405)
+
+  // the workspace delete is state-changing: it needs `application/json` just
+  // like the single-session delete route
+  const formPost = await call({
+    method: 'POST',
+    url: '/session-delete/workspace/delete',
+    body: JSON.stringify({ workspaceId: WORKSPACE_ID }),
+    headers: { 'content-type': 'text/plain' },
+  })
+  assert.equal(formPost.statusCode, 415)
+  assert.equal(formPost.payload.error.code, 'unsupported-media-type')
+
+  assert.equal(await exists(dir), true, 'a refused request must not delete anything')
+  await rm(home, { recursive: true, force: true })
+})

@@ -236,6 +236,11 @@ function mount(exports, options = {}) {
         appended.push(node)
       },
     },
+    addEventListener() {},
+    removeEventListener() {},
+    querySelectorAll() {
+      return []
+    },
   }
   try {
     exports.apply(app.ctx)
@@ -283,7 +288,7 @@ test('apply registers the danger menu row and two shell.overlay entries', async 
   const { app, appended } = mount(exports)
 
   assert.deepEqual(app.injected, [MENU_SLOT, OVERLAY_SLOT, OVERLAY_SLOT])
-  assert.equal(app.effects.length, 3)
+  assert.equal(app.effects.length, 4, 'dictionaries, styles, workspace-menu and slot disposers')
   assert.equal(appended.length, 1)
   assert.match(appended[0].textContent, /session-delete-confirm/)
 
@@ -504,6 +509,108 @@ test('the toast overlay is null until a notice is pushed', async () => {
   const exports = definition.factory(makeRequire([]))
   const { app } = mount(exports)
   assert.equal(app.entries[2].component({}), null)
+})
+
+test('a workspace batch delete previews, confirms, polls the job and toasts once', async () => {
+  const { definition } = await loadBundle()
+  const hooks = createHookRuntime()
+  const exports = definition.factory(makeRequire([], hooks))
+  const { app } = mount(exports)
+  const dict = app.dictionaries.get(NS)
+
+  // the workspace "..." menu row is wired to this programmatic opener
+  assert.equal(typeof exports.openWorkspaceDelete, 'function')
+  exports.openWorkspaceDelete('ws-abc', '我的工作区')
+  assert.notEqual(app.entries[1].component({}), null, 'the workspace dialog must open for a workspace id')
+
+  const requests = []
+  let statusCalls = 0
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = (url, options) => {
+    const target = String(url)
+    requests.push({ url: target, options: options ?? {} })
+    if (target.includes('/health')) {
+      return Promise.resolve({ status: 200, json: async () => ({ ok: true, value: { token: 'boot-token' } }) })
+    }
+    if (target.includes('/workspace/preview')) {
+      return Promise.resolve({
+        status: 200,
+        json: async () => ({
+          ok: true,
+          value: {
+            valid: true,
+            workspaceId: 'ws-abc',
+            title: '我的工作区',
+            count: 2,
+            runningCount: 1,
+            archivedCount: 0,
+            totalFiles: 3,
+            totalBytes: 2048,
+            forceAllowed: true,
+            sessions: [],
+          },
+        }),
+      })
+    }
+    if (target.includes('/workspace/delete')) {
+      return Promise.resolve({
+        status: 200,
+        json: async () => ({ ok: true, value: { jobId: 'job-1', workspaceId: 'ws-abc', total: 2 } }),
+      })
+    }
+    if (target.includes('/workspace/status')) {
+      statusCalls += 1
+      const done = statusCalls >= 2
+      return Promise.resolve({
+        status: 200,
+        json: async () => ({
+          ok: true,
+          value: {
+            jobId: 'job-1',
+            workspaceId: 'ws-abc',
+            state: done ? 'done' : 'running',
+            total: 2,
+            completed: done ? 2 : 1,
+            deleted: done ? 2 : 1,
+            failed: [],
+          },
+        }),
+      })
+    }
+    throw new Error(`unexpected request: ${target}`)
+  }
+
+  try {
+    const loading = renderDialog(hooks, app)
+    assert.equal(loading.props.title, dict.zh['workspace.dialog.title'])
+    assert.equal(loading.props.footer[1].props.disabled, true, 'the preview gates the destructive button')
+
+    await settle()
+    const ready = renderDialog(hooks, app)
+    const confirm = ready.props.footer[1]
+    assert.equal(confirm.props.disabled, false, 'a ready preview enables confirmation')
+    // a running session forces the batch (the host stops it before deleting)
+    assert.equal(confirm.props.children, dict.zh['workspace.dialog.forceDelete'])
+
+    confirm.props.onClick()
+    await settle()
+    const deletion = requests.find((entry) => entry.url.includes('/workspace/delete'))
+    assert.ok(deletion, 'confirming must POST to the workspace delete route')
+    assert.equal(deletion.options.headers['x-session-delete-token'], 'boot-token')
+    assert.deepEqual(JSON.parse(deletion.options.body), { workspaceId: 'ws-abc', force: true })
+
+    // the job runs on the host: the dialog shows progress, and polling finishes
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    const statuses = requests.filter((entry) => entry.url.includes('/workspace/status'))
+    assert.ok(statuses.length >= 2, 'the client must poll until the job is no longer running')
+    assert.equal(app.sessionsRefresh.count, 1, 'a finished batch refreshes the session list')
+    const toast = app.entries[2].component({})
+    assert.notEqual(toast, null, 'a success toast must be shown')
+    assert.match(String(toast.props.children), new RegExp(dict.zh['workspace.toast.deleted'].replace('{n}', '2')))
+    assert.equal(renderDialog(hooks, app), null, 'the dialog must close after the job finishes')
+  } finally {
+    globalThis.fetch = previousFetch
+  }
 })
 
 test('a successful force delete sends the boot token, toasts, refreshes the list and closes', async () => {

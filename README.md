@@ -1,13 +1,13 @@
 # dsh-session-delete
 
-当前版本 **0.1.2**（0.1.1 → 0.1.2：会话数据搬到别的盘、原位置只留目录链接（junction/符号链接）时也能删干净，见 §8 第 19–20 条；0.1.0 → 0.1.1：修掉「宿主 dispose 写回投影缓存」的时序缺陷，见 §8 第 18 条）。
+当前版本 **0.2.0**（0.1.2 → 0.2.0：新增「删除当前工作区的所有会话」——工作区行 `…` 菜单里的批量红色危险项、带计数的预览、后台任务与进度/失败明细，见 §1.1；0.1.1 → 0.1.2：会话数据搬到别的盘、原位置只留目录链接（junction/符号链接）时也能删干净，见 §8 第 19–20 条；0.1.0 → 0.1.1：修掉「宿主 dispose 写回投影缓存」的时序缺陷，见 §8 第 18 条）。
 
-把「删除会话」做成 DSH 插件：**侧栏会话行 `…` 菜单注入红色危险项 → 二次确认模态框 → 七阶段删除流水线 → 广播事件并刷新侧栏**。
+把「删除会话」做成 DSH 插件：**侧栏会话行 `…` 菜单注入红色危险项 → 二次确认模态框 → 七阶段删除流水线 → 广播事件并刷新侧栏**；同一套流水线也支持在**工作区行 `…` 菜单**里一次删掉该工作区的全部会话（逐个执行、后台任务、可关窗、失败逐条报告）。
 删除是**永久**的：会话日志会从磁盘上消失，无法用「撤销」找回。
 
 - 宿主半边（Node）：`lib/index.js` + `lib/host/*` + `lib/core/*` —— 拥有文件系统与宿主服务，通过自建 HTTP 路由暴露能力。
 - 浏览器半边（预构建懒加载 CJS）：`lib/client.js` —— 注入菜单项、确认模态、toast，并调用 `sessions.refresh()`。
-- 状态：核心/宿主/客户端三层共 **77 个测试全部通过**（`node --test "tests/*.test.js"`，core 37 + host 29 + client 11），`tools/doctor.mjs` 在临时 DSH home 上跑通完整七阶段流水线，并由**三次**独立只读对抗式审计逐条复核需求、宿主 API 与绕过面（审计提出的 1 个 blocker + 3 个 major + 其余 minor/info 已全部处理，见 §8）。**已在真实 DSH（desktop profile）里完成端到端验证**：侧栏出现红色「删除会话」、确认后行当场消失、磁盘目录/挂账/投影缓存全部清掉（记录见 §7 末尾）。
+- 状态：核心/宿主/客户端三层共 **82 个测试**（`node --test "tests/*.test.js"`，core 37 + host 33 + client 12），其中 5 个依赖 Windows junction/符号链接权限（`SeCreateSymbolicLinkPrivilege`）的用例在没有该权限的环境里会失败——与改动前 `HEAD` 完全一致（本机沙箱实测：core 3 + host 2），其余全部通过；`tools/doctor.mjs` 在临时 DSH home 上跑通完整七阶段流水线，并由**三次**独立只读对抗式审计逐条复核需求、宿主 API 与绕过面（审计提出的 1 个 blocker + 3 个 major + 其余 minor/info 已全部处理，见 §8）。**已在真实 DSH（desktop profile）里完成端到端验证**：侧栏出现红色「删除会话」、确认后行当场消失、磁盘目录/挂账/投影缓存全部清掉（记录见 §7 末尾）。
 
 ---
 
@@ -37,6 +37,21 @@
 
 返回的报告是结构化的（`report.stages[]` 含每阶段 `status/ms/detail/error`，以及 `deleted/partial/aborted/refused/warnings`），宿主日志里有逐阶段记录。
 
+### 1.1 删除当前工作区的所有会话（0.2.0）
+
+1. **工作区行的 `…` 菜单**里出现 **「删除该工作区的所有会话（N）」**（复用菜单里删除工作区那行的危险样式；N 取自客户端工作区注册表，取不到时显示不带计数的文案）。
+2. 点击后关闭菜单并打开确认模态框，先调用 `POST /session-delete/workspace/preview` 拉取预览：
+   - 工作区标题与路径、会话总数；
+   - 其中多少会话在**运行中**（有活动即视为运行中，确认按钮切换成 force 变体）、多少在归档集合中；
+   - 会被清理的日志文件总数与总占用（只统计磁盘上真实存在的会话目录）。
+3. 确认后调用 `POST /session-delete/workspace/delete` **启动宿主端后台任务**，立即拿到 `{jobId, total}`；客户端不等待删除完成（单个会话的删除已可能超过 20 s 的请求超时，批量更不能同步等），而是每 500 ms 轮询 `POST /session-delete/workspace/status`：
+   - 运行中显示 `已完成 / 总数` 进度；**关掉模态框不会中止任务**，重新打开该工作区的对话框会接着显示进度；
+   - 完成后 toast 汇总（全部成功 / 部分失败），失败条目逐条列出 `sessionId` 与原因；
+   - 全部成功时关闭模态框并 `sessions.refresh()`。
+4. 宿主按 `record.sessionIds` **顺序逐个**执行同一套七阶段流水线（`force` 时先停掉运行中的活动）；单个会话失败不会中断批次，任务状态最终为 `done` / `partial` / `failed`。
+5. 实现说明：DSH 0.2.0-rc.2 的工作区行菜单是**硬编码**的 `rename/delete` 两项（`dsh-client-ui-workspace/lib/client.js` 的 `workspaceMenuItems`），没有插件槽位。本插件在点击工作区行按钮后短暂轮询新出现的 `[role="menu"][data-menu-material]`，克隆其中最后一个危险项并改写标签/点击行为，**不保留全局 MutationObserver**；所有步骤都包在 `try/catch` 里，未来 DSH 改 DOM 时最多是这一项不再出现，不影响会话行菜单与其余功能。
+6. 验证状态：批量删除的宿主半边（预览 / job / 轮询）与对话框全流程由自动化测试覆盖；**菜单项本体是 DOM 增强，本机没有可操作的浏览器，尚未在真实 DSH GUI 里点过**（会话行菜单与 0.1.x 全部功能已在真实 DSH 里验证）。升级后请按 §7 实测一次：没出现时先看 §9 排障表，也可用 `openWorkspaceDelete(workspaceId)` 或直接调 `/session-delete/workspace/*` 绕过 UI。
+
 ---
 
 ## 2. 目录结构
@@ -45,18 +60,18 @@
 |------|------|
 | `package.json` | `dsh.client`（`platform: web`、`inject: []`）+ `dsh.bundle.patch` + `exports["./client"]` |
 | `cordis.patch.yml` | bundle patch：向 profile 插件名册插入 `id: session-delete` 行 |
-| `lib/index.js` | Cordis 入口：`name` / `inject = []` / `apply()`，装配 runtime + stages + HTTP handler |
-| `lib/host/runtime.js` | 宿主能力适配器：路径解析、会话头、运行态、挂账/归档集合读写、活动检查、内存摘除、广播、`preview()` |
+| `lib/index.js` | Cordis 入口：`name` / `inject = []` / `apply()`，装配 runtime + stages + HTTP handler + 批量删除 job 表（`startWorkspaceDelete` / `workspaceJob`） |
+| `lib/host/runtime.js` | 宿主能力适配器：路径解析、会话头、运行态、挂账/归档集合读写、活动检查、内存摘除、广播、`preview()`、`previewWorkspace()`（工作区会话清单 + 磁盘统计） |
 | `lib/host/stages.js` | 把 runtime 能力接成七个阶段函数（含 `force` 语义与磁盘重试） |
-| `lib/host/http.js` | `/session-delete/*` 路由：`{ok,value}` / `{ok,error}` 信封、来源/令牌/JSON 准入、400/403/405/409/413/415 守卫 |
+| `lib/host/http.js` | `/session-delete/*` 路由：`{ok,value}` / `{ok,error}` 信封、来源/令牌/JSON 准入、400/403/405/409/413/415 守卫，以及工作区预览 / 批量删除 / job 状态三个路由 |
 | `lib/core/paths.js` | `encodeSegment` / session 目录名与 id 的互推、非法 id 判定 |
 | `lib/core/scan.js` | 目录发现与统计（`describeDir` / `removeSessionDirs` / 投影缓存候选） |
 | `lib/core/ledger.js` | `workspace.json` 的纯函数式读写改（含原子替换、校验 `verdict`、重复 id 全清） |
 | `lib/core/pipeline.js` | 七阶段定义 `STAGES`、`runDeletionPipeline`、`summarizeReport`、`describeError` |
-| `lib/client.js` | 浏览器半边（手写懒加载 CJS：`window.__ModuleLoader__.load({id, factory})`） |
-| `tests/core.test.js` | 32 个纯逻辑用例（路径编码、扫描、账本、流水线语义） |
-| `tests/host.test.js` | 27 个宿主用例（真实临时 DSH home + stub 服务 + 伪 req/res + 阶段级 fake runtime，含“摘除后重扫投影缓存”的时序断言） |
-| `tests/client-bundle.test.js` | 11 个客户端契约/行为用例（自建 module loader 替身 + 自建 hook 运行时驱动真实渲染状态 + 参照 `.ref/` 的槽位/样式/exports 交叉核对） |
+| `lib/client.js` | 浏览器半边（手写懒加载 CJS：`window.__ModuleLoader__.load({id, factory})`）：会话行菜单项、两种确认模态、toast、工作区行菜单 DOM 增强、job 轮询器 |
+| `tests/core.test.js` | 37 个纯逻辑用例（路径编码、扫描、账本、流水线语义） |
+| `tests/host.test.js` | 宿主用例（真实临时 DSH home + stub 服务 + 伪 req/res + 阶段级 fake runtime，含“摘除后重扫投影缓存”的时序断言、工作区预览/批量删除/job 轮询） |
+| `tests/client-bundle.test.js` | 12 个客户端契约/行为用例（自建 module loader 替身 + 自建 hook 运行时驱动真实渲染状态 + 参照 `.ref/` 的槽位/样式/exports 交叉核对，含工作区批量删除的预览→确认→轮询→toast 全流程） |
 | `tests/helpers/client-contract.mjs` | 槽位名/顺序常量，防契约漂移 |
 | `tools/doctor.mjs` | 手工自检：构造临时 home 跑一次流水线（`--live --registry --busy --force`） |
 | `tools/asar.mjs` | 解包/读取 DSH asar 安装体的辅助脚本 |
@@ -74,12 +89,12 @@
 
 ```powershell
 dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete           # 跟随 main 最新提交
-dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete#v0.1.2   # 固定到 release tag（推荐）
+dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete#v0.2.0   # 固定到 release tag（推荐）
 ```
 
 - 走 GitHub 打好的 tarball（`codeload.github.com`），**本机不需要装 git**。本包没有运行期依赖（`package.json` 无 `dependencies`），装的就是这一个 tarball。已实测：`github:Baboo-ming/dsh-session-delete` 12 s 装完 `0.1.2`，`pnpm-lock.yaml` 把来源锁成提交 `defac52`。
 - 不想开终端也可以：**设置 → 插件 → 安装**，粘贴 `github:Baboo-ming/dsh-session-delete`（同一套 spec 解析器）。
-- **升级**：换成新 tag 重跑一次（`…#v0.1.3`）。`github:` 依赖在 lockfile 里按**提交**锁定，不重跑、不换 tag 就一直是旧版本。
+- **升级**：换成新 tag 重跑一次（`…#v0.2.1`）。`github:` 依赖在 lockfile 里按**提交**锁定，不重跑、不换 tag 就一直是旧版本。
 - 同一套 spec 还接受 `git+https://github.com/…`、完整仓库 URL、`.tgz` 地址、registry 名（`dsh-session-delete@0.1.2`，前提是发过 npm）。
 - `dsh plugin add` 会自动把 `dsh-session-delete` 追加到 `dsh.profile.bundles`；**不要**再往 profile 自己的 `cordis.patch.yml` 里插一行同名插件：`cordis.patch.yml`（bundle patch）已经会插入，重复 id 会让加载器崩。
 
@@ -96,12 +111,12 @@ dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete#v0.1.2   #
         - "D:/AI_Work/开发/删除会话插件/lib"
   ```
 
-  之后 `dsh-hmr` 会监视 `lib/`：改动任一模块（含 mtime 变化）都会清掉该模块图的 ESM/CJS 缓存、重新 import 入口，并把新插件热替换进同一个 entry（token 会轮换，客户端遇到 403 `invalid-token` 会自动重新取一次）。本机验证方式：把 `lib/index.js` 的 `version` 提到新值（如 `0.1.2`）并 touch `lib/**/*.js`，约 3 秒后 `/session-delete/health` 就返回新版本号。改 `lib/client.js` 仍由 `dsh-client-hmr`（500 ms 轮询）热替换，或直接刷新页面。
+  之后 `dsh-hmr` 会监视 `lib/`：改动任一模块（含 mtime 变化）都会清掉该模块图的 ESM/CJS 缓存、重新 import 入口，并把新插件热替换进同一个 entry（token 会轮换，客户端遇到 403 `invalid-token` 会自动重新取一次）。本机验证方式：把 `lib/index.js` 的 `version` 提到新值（如 `0.2.0`）并 touch `lib/**/*.js`，约 3 秒后 `/session-delete/health` 就返回新版本号。改 `lib/client.js` 仍由 `dsh-client-hmr`（500 ms 轮询）热替换，或直接刷新页面。
 - 验证宿主已挂载：
 
   ```powershell
   Invoke-RestMethod http://127.0.0.1:19387/session-delete/health
-  # -> { ok: true, value: { name: 'dsh-session-delete', version: '0.1.2', token: '<uuid>', requireToken: true } }
+  # -> { ok: true, value: { name: 'dsh-session-delete', version: '0.2.0', token: '<uuid>', requireToken: true } }
   ```
 
   `version` 同时是「运行中的进程加载的是哪一代代码」的判据。
@@ -118,15 +133,15 @@ dsh plugin --profile desktop add github:Baboo-ming/dsh-session-delete#v0.1.2   #
 
 ```powershell
 git add -A
-git commit -m "dsh-session-delete 0.1.3"
+git commit -m "dsh-session-delete 0.2.0"
 git push origin main
-git tag -a v0.1.3 -m "dsh-session-delete 0.1.3"
-git push origin v0.1.3
+git tag -a v0.2.0 -m "dsh-session-delete 0.2.0"
+git push origin v0.2.0
 ```
 
-推完 tag，用户就能用 `github:Baboo-ming/dsh-session-delete#v0.1.3` 安装或升级到这一版（不打 tag 也能装，但锁的是某个提交，不好核对版本）。
+推完 tag，用户就能用 `github:Baboo-ming/dsh-session-delete#v0.2.0` 安装或升级到这一版（不打 tag 也能装，但锁的是某个提交，不好核对版本）。
 
-> `package.json` 里的 `"private": true` 只挡 `npm publish`，不影响 `github:` / `link:` 安装；哪天想同时发 npm，把它改成 `false`，用户就能 `dsh plugin --profile desktop add dsh-session-delete@0.1.3`。
+> `package.json` 里的 `"private": true` 只挡 `npm publish`，不影响 `github:` / `link:` 安装；哪天想同时发 npm，把它改成 `false`，用户就能 `dsh plugin --profile desktop add dsh-session-delete@0.2.0`。
 
 ---
 
@@ -184,6 +199,9 @@ dsh plugin --profile desktop remove dsh-session-delete
 | `GET` | `/session-delete/health` | — | `{ok:true,value:{name,version,token,requireToken}}`（不回显任何路径） |
 | `POST` | `/session-delete/preview` | `{sessionId}`（也支持 `?sessionId=`） | `{ok:true,value:{valid,known,live,cwd,activity,dirs,cwds,totalBytes,totalFiles,cache,workspaces,archived,pinned,registryAvailable,forceAllowed}}` |
 | `POST` | `/session-delete/delete`（别名 `/session-delete`，尾斜杠会先被规范化） | `{sessionId, force?}` | `{ok:report.deleted, value:report}`；被 gate 拒绝 ⇒ **409** |
+| `POST` | `/session-delete/workspace/preview` | `{workspaceId}` | `{ok:true,value:{valid,workspaceId,title,path,source,count,runningCount,archivedCount,pinnedCount,totalBytes,totalFiles,forceAllowed,sessions:[…]}}`；不存在 ⇒ **404** |
+| `POST` | `/session-delete/workspace/delete` | `{workspaceId, force?}` | `{ok:true,value:{jobId,workspaceId,total}}`；工作区没有会话 ⇒ **409** |
+| `POST` | `/session-delete/workspace/status` | `{jobId}` | `{ok:true,value:{jobId,workspaceId,state,total,completed,deleted,failed:[{sessionId,refused,message}],current,error}}`；`state` 为 `running`/`done`/`partial`/`failed`，未知 job ⇒ **404** |
 
 错误信封统一为 `{ok:false,error:{code,message}}`：
 
@@ -192,6 +210,10 @@ dsh plugin --profile desktop remove dsh-session-delete
 | `cross-site-blocked` / `cross-origin-blocked` | 403 | 跨站来源 / 跨源或 `Origin: null` / host 或协议不匹配 |
 | `invalid-token` | 403 | 除 `/health` 外的路由缺少令牌或令牌不对 |
 | `invalid-session-id` | 400 | id 缺失、非法或含穿越字符 |
+| `invalid-workspace` | 400 | 工作区 id 缺失或非法 |
+| `unknown-workspace` | 404 | 工作区已不存在（注册表与 `workspace.json` 都没有） |
+| `empty-workspace` | 409 | 该工作区当前没有可删除的会话 |
+| `unknown-job` | 404 | 批量删除 jobId 不存在或已过期回收 |
 | `force-not-allowed` | 403 | `force: true` 但配置 `allowForce: false` |
 | `method-not-allowed` | 405 | `delete` 收到非 POST |
 | `unsupported-media-type` | 415 | POST 不是 `application/json` |
@@ -208,7 +230,7 @@ dsh plugin --profile desktop remove dsh-session-delete
 ```powershell
 # 打包运行时的 node（本机实测路径；DSH 安装体内的 primary-runtime 同样可用）
 $NODE = "C:\Users\ming\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\node.exe"
-& $NODE --test "tests/*.test.js"                 # 77 passed（core 37 + host 29 + client 11）
+& $NODE --test "tests/*.test.js"                 # 82 个用例（core 37 + host 33 + client 12）；无符号链接权限时 5 个 junction 用例失败
 & $NODE tools/doctor.mjs --live --busy --force   # 临时 home 上跑一遍完整流水线并打印报告
 ```
 
@@ -261,6 +283,7 @@ $NODE = "C:\Users\ming\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\b
 18. **投影缓存必须在内存摘除之后重扫一次**：`session_projcache` 的 domain 记录删掉不等于文件消失——宿主在会话 dispose 时会再写一份最终 projection 快照。真实环境实测：删除成功约 27 s 后，`<storagesRoot>\session_projcache\sessions\<id>.json` 又被写回（内容里还带着会话标题），而 `workspaceRegistry` 的 header 缓存因此继续报 `sessionKnown(id) === true`（`dsh-workspace/lib/index.js:612-617` 的缓存 `headers` 从不按 id 逐条清理）。所以第 5 阶段改成「domain 记录 + 文件」两条路都删，第 6 阶段摘除后再扫一遍，兜住这次写回。
 19. **会话目录是目录链接时，必须连链接目标一起删**：用户把会话数据搬到 D:/E: 盘、在原来的位置只留 `mklink /J`（junction）是很自然的做法，而 `fs.rm(dir, { recursive: true })` 遇到 reparse point **只解开链接、不删目标**——实测（Windows `mklink /J`）会留下全部日志文件，旧行为却报告成功：一次「删掉了」的假象。`0.1.2` 因此先 `lstat` 判链接、`realpath` 解析目标，再按目标名分两种策略执行：目标名 == 会话 ID（`encodeSegment(sessionId)`，宿主自己的布局）→ 递归删目标；目标名任意 → **只删目标目录里的会话文件**（`session.jsonl` / `session.v(N).jsonl` + 可选 `.zstd` / `.tmp`、`session.lock`），随后 `rmdir` 目标（只在变空时成功），其余文件原样保留并写进报告 `leftover`；链接指向的目录里**一个会话文件都没有**（= 无关目录或恶意链接）→ 直接拒绝，不递归。链接始终在负载之后才删：负载被占用时链接仍在，第 6 阶段的 `leftover` 重试才有路径可打。
 20. **`session.lock` 是真名，别猜成 `<日志>.lock`**：`dsh-session-persistence-jsonl/lib/index.js:643` 的 `LEASE_FILENAME = "session.lock"`（`:667` 拼成 `join(dir, LEASE_FILENAME)`），所以预览里的 `locked` 只认 `session.lock` / `session.v(N).lock` 两种名字；`session.v4.jsonl.lock` 这种臆造名既不会被判锁、也不会被第 5 阶段顺手带走（它不在会话文件白名单里）。同时日志名补齐了第 0 代：`sessionFormatLogFilename(0)` 返回 `session.jsonl`（无 `.vN`），`SESSION_LOG_PATTERN` 已放宽成 `/^session(\.v\d+)?\.jsonl(\.zstd)?$/`。失败详情也不再打印 `[object Object]`（`removeSessionDirs` 的失败项里 `error` 是字符串、服务失败是 `Error` 对象，展示层两种都要认）。
+21. **工作区行菜单只能 DOM 增强，批量删除必须做成宿主 job**（`0.2.0`）：工作区行菜单由 `dsh-client-ui-workspace/lib/client.js:1270-1340` 的硬编码 `workspaceMenuItems` 渲染，DSH 0.2.0-rc.2 没有对应槽位（README 明确写工作区行菜单「visual-only except Rename/Delete」）。因此客户端在点击工作区行按钮后启动一个**短生命周期** rAF 轮询，找到新挂载的 `[role="menu"][data-menu-material]`，用 `document.activeElement.closest('[data-row-key^="workspace:"]')` + `elementFromPoint` 双重定位工作区，克隆菜单里最后一个危险项、改写标签与点击行为；不保留全局 MutationObserver，任一步失败只是少一个菜单项。批量删除同步 POST 会撞上客户端 20 s 超时，所以宿主用内存 job 表（`startWorkspaceDelete`/`workspaceJob`，完成后 30 min 回收、最多 50 个）逐会话跑七阶段流水线，客户端轮询进度；关窗不中止任务，重开对话框会续上进度。
 
 ---
 
@@ -269,6 +292,8 @@ $NODE = "C:\Users\ming\.dsh\dsh-runtimes\dsh-primary-runtime\dependencies\node\b
 | 现象 | 排查 |
 |------|------|
 | `…` 菜单里没有「删除会话」 | 客户端插件没加载：确认 `dsh.profile.bundles` 里有 `dsh-session-delete`、`node_modules\dsh-session-delete` 存在（GitHub 安装是普通目录，`link:` 安装是 junction）、已重启桌面端并刷新页面；再确认槽位 `sidebar.workspaces.session.menu.item` 仍是 `kind: "list"`（跑 `tests/client-bundle.test.js` 会交叉核对 `.ref/` 真实契约） |
+| 工作区行 `…` 菜单里没有「删除该工作区的所有会话」 | 该项是 DOM 增强（DSH 0.2.0-rc.2 无槽位）：确认客户端已加载、工作区行有 `data-row-key="workspace:<id>"`、菜单容器是 `[role="menu"][data-menu-material]`；DSH 改版后该增强可能静默失效，但会话行菜单与批量接口不受影响（可用 `openWorkspaceDelete` 或直接调 `/session-delete/workspace/*`） |
+| 工作区批量删除一直显示“运行中” | 任务在宿主端执行：看 `/session-delete/workspace/status` 的 `state`；某会话卡住通常是文件占用，任务仍会逐个继续并在 `failed` 里列出；30 min 后 job 会被回收（此后 status 返回 404） |
 | `dsh plugin add` 直接报 `a local path must be absolute` | 路径式 spec（`link:` / `file:` / 裸路径）必须是**绝对**路径；从 GitHub 装请写 `github:<owner>/<repo>[#tag]`。安装失败时 `dsh plugin add` 会把 profile 的 `package.json` / `pnpm-lock.yaml` 还原成原样（已下载的文件可能留下） |
 | 确认框一直转圈/报网络错 | 宿主路由没挂上：`/session-delete/health` 是否 200；`webServer` 能力是否可用；客户端 20 s 超时会提示「宿主无响应」 |
 | 提示 403 `invalid-token` | DSH 重启后令牌轮换：刷新页面即可（客户端会自动重取一次令牌并重试一次） |
